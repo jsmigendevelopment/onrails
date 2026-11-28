@@ -12,7 +12,8 @@ export const ADDONS = fileURLToPath(new URL("../../stacks/tanstack-start-addons/
 export const PACK = fileURLToPath(new URL("../../stacks/tanstack-start/", import.meta.url));
 
 // Generated files the pack's lint and format skip (src/routeTree.gen.ts): a step may name one, but never fixes it.
-const IGNORED = new Set(readFileSync(join(PACK, ".prettierignore"), "utf8").split("\n").map((l) => l.trim()));
+const IGNORED = new Set(readFileSync(join(PACK, ".prettierignore"), "utf8").split("\n")
+  .map((l) => l.trim()).filter((l) => l && !l.startsWith("#")));
 // What the pack's lint covers: ESLint's file types, and the types `prettier --check .` formats.
 const LINTS = /\.(ts|tsx|js|mjs|cjs)$/;
 const FORMATS = /\.(ts|tsx|js|mjs|cjs|json|jsonc|css|md|ya?ml|html)$/;
@@ -30,6 +31,15 @@ export const ALLOWED = [
 ];
 const SHAPE = `${ALLOWED.map((a) => a.name).join(", then ")}, joined by &&`;
 
+// True when the pack's lint and format skip the path: a listed file, or anything in a listed folder. A line with a
+// `/` (`/docs`, `src/routeTree.gen.ts`) starts at the pack's root; one without (`node_modules`, `dist`) matches at any depth.
+function isIgnored(f) {
+  return [...IGNORED].some((entry) => {
+    const rooted = entry.replace(/^\//, "").replace(/\/$/, "");
+    return entry.includes("/") ? f === rooted || f.startsWith(`${rooted}/`) : f.split("/").includes(rooted);
+  });
+}
+
 function copied(root, dir = root) {
   return readdirSync(dir, { withFileTypes: true }).flatMap((d) =>
     d.isDirectory() ? copied(root, join(dir, d.name)) : [relative(root, join(dir, d.name)).replaceAll("\\", "/")]);
@@ -38,11 +48,19 @@ function copied(root, dir = root) {
 // Any way to run ESLint or Prettier (or the pack's format and fix scripts) by hand. The lint step is the one
 // place an add-on runs them, on its own files: a whole-project run in another step rewrites files it never touched,
 // and one before the types exist misreads the code. Each pattern ends at the end of the line or the closing backtick.
+// Named forms (#515): a package manager, with flags and `exec`, `run`, `dlx` or `x` (`pnpm -s exec eslint`); a
+// one-off runner (`npx`, `bunx`, `pnpx`); and the binary itself, by any path (`./node_modules/.bin/eslint`).
+// `eslint.config.js` and `eslint-plugin-x` don't match: the tool name must end there.
+const PM = String.raw`(?:pnpm|npm|yarn|bun)\s+(?:-\S+\s+)*`;
+const REST = "[^\\n`]*";
+const TOOL = String.raw`(?:eslint|prettier)(?![\w.-])` + REST;
 const STRAY = [
-  /\b(?:pnpm|npm|yarn|npx)\s+(?:(?:exec|run|dlx)\s+)?(?:eslint|prettier)(?![\w.-])[^\n`]*/,
-  /\bpnpm\s+(?:run\s+)?(?:format|fix|lint:fix)(?![\w:-])/,
-  /\bpnpm\s+(?:run\s+)?lint\b[^\n`]*--fix/,
-  /^[ \t]*(?:eslint|prettier)\s[^\n`]*/m,
+  new RegExp(String.raw`\b${PM}(?:(?:exec|run|dlx|x)\s+(?:-\S+\s+)*)?${TOOL}`),
+  new RegExp(String.raw`\b(?:npx|bunx|pnpx)\s+(?:-\S+\s+)*${TOOL}`),
+  new RegExp(String.raw`(?<![\w.~/-])/?(?:[\w.~-]+/)*node_modules/\.bin/${TOOL}`),
+  new RegExp(String.raw`\b${PM}(?:run\s+)?(?:format|fix|lint:fix)(?![\w:-])`),
+  new RegExp(String.raw`\b${PM}(?:run\s+)?lint\b${REST}--fix`),
+  new RegExp(String.raw`^[ \t]*(?:eslint|prettier)\s${REST}`, "m"),
 ];
 
 /**
@@ -62,10 +80,13 @@ export function addonLint(name, { edit = (text) => text } = {}) {
   // told from a prose mention: ship it in the add-on's files/ folder, which is always seen. The package.json and
   // lockfile that `pnpm add` writes are named only in code, and nothing lints them. So backtick a pack path only
   // for a file the steps really edit: every one counts as touched, and the lint step must lint and format it.
+  // #515: a path the pack's lint skips (`node_modules/...`, `docs/stack.md`) is never touched, whatever the prose
+  // says. The first folder is a plain name or a dot folder (`.github/x.yml`); a name with a dot inside, such as
+  // the host in `example.com/docs/a.html`, is not a folder the step makes.
   const isPackFile = (f) => existsSync(join(PACK, f)) && statSync(join(PACK, f)).isFile();
-  const isNewFile = (f) => /^\w[\w.-]*\/[\w./-]+\.\w+$/.test(f) && !f.includes("..");
+  const isNewFile = (f) => /^\.?\w[\w-]*\/[\w./-]+\.\w+$/.test(f) && !f.includes("..");
   const edited = [...new Set([...apply.replace(/```[\s\S]*?```/g, "").matchAll(/`([^`\s]+)`/g)].map((m) => m[1]))]
-    .filter((f) => (isPackFile(f) || isNewFile(f)) && !IGNORED.has(f));
+    .filter((f) => (isPackFile(f) || isNewFile(f)) && !isIgnored(f));
   const copiedFiles = existsSync(files) ? copied(files) : [];
   const touched = new Set([...copiedFiles, ...edited]);
   // A folder the add-on brings whole (new to the pack) may stand for all its files in the step.
