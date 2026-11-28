@@ -31,7 +31,16 @@ const LIMIT_WORD = /^(?:under|up to|at most|<|≤)/i;
 const SECOND = /\d\+?\s*k?\s*(?:\p{L}+\s+)?(?:lines?|loc)(?!\p{L})/iu;
 const TESTS = /(?<![\p{L}\p{N}])tests?(?![\p{L}\p{N}/._-])(?:\s+(?:code|files?|cases?|suites?))?[\s:=~≈+(\[\-–—]*(?:(?:about|around|roughly|approximately|approx\.?|another|add|adds|plus)\s*)?\d[\d,.]*\s*k?(?!\p{L})|(?<![\p{L}\p{N}#/._-])\d[\d,.]*\s*k?\s*(?:\p{L}+\s+)?tests?(?![\p{L}\p{N}/._-])/iu;
 // A count of files, not of lines ("test files: 2", "tests – 2 new files", under 10): cut out before TESTS reads the part.
-const FILE_COUNT = /(?<![\p{L}\p{N}])tests?\s+files?[\s:=~≈+(\[\-–—]*\d(?![\d,.\p{L}])|(?<=tests?[\s:=~≈+(\[\-–—]+)\d(?!\d)\s+(?:new\s+)?files?(?!\p{L})/giu;
+// Not one when another number follows it ("tests: 5 files, 600", "test files: 5 (600)"): that is a second estimate,
+// unless it is a count of files too ("tests: 2 files and 3 files").
+// Arm 1 is "test files" and the count. Arm 2 is the count and "files" after "tests"; its lookbehind sits after the
+// digit, so a long run of separators is read backwards once, not from every position (#529).
+const MORE = String.raw`(?![\s,;:(\[]*(?:\p{L}+\s+)?\d[\d,.]*\s*k?(?!\p{L})(?!\s*(?:new\s+)?files?(?!\p{L})))`;
+const FILE_COUNT = new RegExp(
+  String.raw`(?<![\p{L}\p{N}])tests?\s+files?[\s:=~≈+(\[\-–—]*\d(?![\d,.\p{L}])${MORE}` +
+    String.raw`|\d(?<=tests?[\s:=~≈+(\[\-–—]+\d)(?!\d)\s+(?:new\s+)?files?(?!\p{L})${MORE}`,
+  "giu",
+);
 // The two whole forms, each only at the start of the value or right after a "·".
 const EXCEPTION = /^exception:\s*/i;
 const SPLIT = /^split into\s+(#\d+(?:\s*(?:,|&|and)\s*#\d+)*)\s*$/i;
@@ -50,10 +59,14 @@ const SPLIT_SAID = new RegExp(
     String.raw`|(?:broken|cut)(?:\s+up)?\s+into|split\s*[.!]?\s*$|child(?:ren)?\s+issues?|children\s+#?\d+)(?!\p{L})`,
   "giu",
 );
-// A clause ends at punctuation, a dash or slash, or at "so", "and", "then" or "but" when the split comes right after
-// it: "too big - split into ..." and "too big and split into ..." fail, "not so easy to split into parts" passes.
-const CLAUSE = /[,;:.()\/–—]|\s-\s|(?<!\p{L})(?:so|and|then|but)(?=\s+(?:(?:we|i|it|it['’]s|this|they|is|are|was|were|be|been|got|has|have|had|now|already|also|then)\s+)*(?:split|broken|cut)(?!\p{L}))/iu;
-const CLAUSE_ALL = new RegExp(CLAUSE, "giu");
+// A clause ends at punctuation, a dash or slash ("too big - split into ...").
+const CLAUSE = /[,;:.()\/–—]|\s-\s/giu;
+// "so", "and", "then" or "but" ends it too, unless what stands between it and the split carries the negation on:
+// a word or two and "to" ("not so easy to split", "too risky and costly to split", "hard to review but harder to split"),
+// or one manner adverb ("cannot be safely and cleanly split"). "too big and the work was split", "and therefore split" end it.
+const JOINER = /(?<!\p{L})(?:so|and|then|but)(?!\p{L})/giu;
+const SPLIT_VERB = /\s*(?:split(?:s|ting)?|broken|cut)(?:\s+up)?\s+(?:into|in|across|between|as)$/i;
+const CARRIES_ON = /^(?:(?:\p{L}+\s+){1,2}to|(?:cleanly|safely|easily|neatly|sensibly|sanely|reasonably|practically))$/iu;
 // "splitting into parts would break the build": the split is what a consequence is about, not what was done.
 const CONSEQUENCE = /^\s*(?:\p{L}+\s+){0,2}(?:would|will|could|might)(?!\p{L})/iu;
 const NEGATION = /(?<!\p{L})(?:no|not|never|cannot|can['’]?t|won['’]?t|don['’]?t|doesn['’]?t|isn['’]?t|unable|without|hard|too)(?!\p{L})/iu;
@@ -122,10 +135,16 @@ const noReason = (reason) => {
   const words = reason.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, "").replace(/\s+/g, " ").trim();
   return PLACEHOLDERS.has(words) || PLACEHOLDER_START.test(words);
 };
-// The clause a split phrase sits in, read from the whole reason: "so", "and" or "but" ends a clause only if the split follows.
+// The clause a split phrase sits in, read from the whole reason: from the last punctuation, then from the last
+// "so", "and", "then" or "but" that doesn't carry the negation on to the split.
 const clauseBefore = (reason, index) => {
-  const cut = [...reason.matchAll(CLAUSE_ALL)].filter((c) => c.index + c[0].length <= index).pop();
-  return reason.slice(cut ? cut.index + cut[0].length : 0, index);
+  const head = reason.slice(0, index);
+  const clause = head.slice([...head.matchAll(CLAUSE)].reduce((end, m) => m.index + m[0].length, 0));
+  for (const joiner of [...clause.matchAll(JOINER)].reverse()) {
+    const after = clause.slice(joiner.index + joiner[0].length);
+    if (!CARRIES_ON.test(after.trim().replace(SPLIT_VERB, ""))) return after;
+  }
+  return clause;
 };
 const splitReason = (reason) =>
   /#\d+/.test(reason) || [...reason.matchAll(SPLIT_SAID)].some((m) =>
